@@ -1,4 +1,6 @@
-﻿using Newtonsoft.Json;
+﻿using System.Diagnostics;
+using System.Dynamic;
+using Newtonsoft.Json;
 using NSmartProxy.Data;
 using System.IO;
 
@@ -6,6 +8,26 @@ namespace NSmartProxy.Infrastructure
 {
     public static class ConfigHelper
     {
+        public static string AppSettingFullPath
+        {
+            get
+            {
+                var processModule = Process.GetCurrentProcess().MainModule;
+                var path1 =Path.GetDirectoryName(processModule?.FileName)
+                       + Path.DirectorySeparatorChar
+                       + "appsettings.json";
+                var path2 = "./appsettings.json";
+                if (File.Exists(path1))
+                {
+                    return path1;
+                }
+                else
+                {
+                    return path2;
+                }
+            }
+        }
+
         /// <summary>
         /// 读配置
         /// </summary>
@@ -38,7 +60,7 @@ namespace NSmartProxy.Infrastructure
                     IndentChar = ' '
                 };
                 serializer.Serialize(jsonWriter, config);
-                
+
                 sw.Close();
             }
 

@@ -132,6 +132,16 @@ namespace NSmartProxy.Database
             //输出
         }
 
+        public string GetConfig(string userId)
+        {
+            throw new NotImplementedException();
+        }
+
+        public void SetConfig(string userId, string config)
+        {
+            throw new NotImplementedException();
+        }
+
         /// <summary>
         /// 通过序列删除数据，并且返回id
         /// </summary>
@@ -158,6 +168,11 @@ namespace NSmartProxy.Database
         public bool Exist(string key)
         {
             return hashf.Exist(String2Bytes(key));
+        }
+
+        public int GetCount()
+        {
+            throw new NotImplementedException();
         }
 
         public bool Exist(long key)

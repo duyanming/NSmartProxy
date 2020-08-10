@@ -3,9 +3,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using NSmartProxy.Data;
 using NSmartProxy.Infrastructure;
+using Snappy.Sharp;
 
 namespace NSmartProxy
 {
@@ -59,12 +61,12 @@ namespace NSmartProxy
 
         public static string ToASCIIString(this byte[] bytes)
         {
-            return System.Text.ASCIIEncoding.ASCII.GetString(bytes);
+            return System.Text.Encoding.ASCII.GetString(bytes);
         }
 
         public static byte[] ToASCIIBytes(this string str)
         {
-            return System.Text.ASCIIEncoding.ASCII.GetBytes(str);
+            return System.Text.Encoding.ASCII.GetBytes(str);
         }
 
         /// <summary>
@@ -206,6 +208,55 @@ namespace NSmartProxy
                     return false;
             }
             return true;
+        }
+
+        /// <summary>
+        /// 使用snappy算法解压缩
+        /// </summary>
+        /// <param name="compressed"></param>
+        /// <param name="offset"></param>
+        /// <param name="length"></param>
+        /// <returns></returns>
+        public static byte[] DecompressInSnappy(byte[] compressed, int offset, int length)
+        {
+            SnappyDecompressor sd = new SnappyDecompressor();
+            try
+            {
+                return sd.Decompress(compressed, offset, length);
+            }
+            catch (Exception ex)
+            {
+                _ = ex;
+                //啥情況？
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 使用snappy算法压缩
+        /// </summary>
+        /// <param name="uncompressed"></param>
+        /// <param name="offset"></param>
+        /// <param name="uncompressedLength"></param>
+        /// <returns></returns>
+        public static CompressedBytes CompressInSnappy(byte[] uncompressed, int offset, int uncompressedLength)
+        {
+            SnappyCompressor sc = new SnappyCompressor();
+
+            //var bytes = Encoding.ASCII.GetBytes("HelloWor134ertegsdfgsfdgsdfgsdfgsfdgsdfgsdfgsdfgsdfgdsfgsdfgdsfgdfgdsfgld");
+            byte[] outBytes = new byte[sc.MaxCompressedLength(uncompressed.Length)];
+
+            int actualLength = sc.Compress(uncompressed, 0, uncompressedLength, outBytes);
+            return new CompressedBytes() { ContentBytes = outBytes, Length = actualLength };
+        }
+
+        /// <summary>
+        /// 压缩专用对象
+        /// </summary>
+        public class CompressedBytes
+        {
+            public int Length;
+            public byte[] ContentBytes;
         }
     }
 }

@@ -60,6 +60,7 @@ namespace NSmartProxy.Database
             );
         }
 
+        //TODO 如下update方法可能会把config覆盖掉，之后再考虑怎么做
         public void Update(long key, string value)
         {
             keyCache.TryRemove(key.ToString(), out _);
@@ -81,10 +82,32 @@ namespace NSmartProxy.Database
         //    keyCache.TryRemove(userName, out _);
         //    liteCollection.Update(new KV(userName, value));
         //}
+        public int GetCount()
+        {
+            return liteCollection.Count();
+        }
 
         public List<string> Select(int startIndex, int length)
         {
             return liteCollection.FindAll().Select(kv => kv.Value).ToList();
+        }
+
+        public string GetConfig(string userId)
+        {
+            var obj = liteCollection.FindById(userId);
+            if (obj != null)
+            {
+                return obj.Config;
+            }
+
+            return null;
+        }
+
+        public void SetConfig(string userId, string config)
+        {
+            var obj = liteCollection.FindById(userId);
+            obj.Config = config;
+            liteCollection.Update(obj);
         }
 
         public string Get(long key)
@@ -203,5 +226,6 @@ namespace NSmartProxy.Database
         [BsonId]
         public string Key { get; set; }
         public string Value { get; set; }
+        public string Config { get; set; }//客户端配置后期指定
     }
 }

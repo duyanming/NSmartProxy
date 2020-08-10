@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -11,6 +12,8 @@ using NSmartProxy.Data;
 using NSmartProxy.Data.DTOs;
 using NSmartProxy.Data.DBEntities;
 using NSmartProxy.Database;
+using NSmartProxy.Infrastructure.Extension;
+using NSmartProxy.Infrastructure.Interfaces;
 using NSmartProxy.Shared;
 
 namespace NSmartProxy.Extension
@@ -18,20 +21,58 @@ namespace NSmartProxy.Extension
     /// <summary>
     /// 这里存放API
     /// </summary>
-    partial class HttpServer
+    partial class HttpServerApis : IWebController
     {
         public const string SUPER_VARIABLE_INDEX_ID = "$index_id$";
+        private NSPServerContext ServerContext;
+        private HttpListenerContext HttpContext;
+        private IDbOperator Dbop;
+        private string baseLogFilePath;
+
+        public HttpServerApis(IServerContext serverContext, IDbOperator dbOperator, string logfilePath)
+        {
+            ServerContext = (NSPServerContext)serverContext;
+            Dbop = dbOperator;
+            baseLogFilePath = logfilePath;
+
+            //如果库中没有任何记录，则增加默认用户
+            if (Dbop.GetLength() < 1)
+            {
+                AddUserV2("admin", "admin", "1");
+            }
+        }
 
         #region  dashboard
         [Secure]
         [API]
         public ServerStatusDTO GetServerStatus()
         {
+
             ServerStatusDTO dto = new ServerStatusDTO
             {
+
                 connectCount = ServerContext.ConnectCount,
                 totalReceivedBytes = ServerContext.TotalReceivedBytes,
                 totalSentBytes = ServerContext.TotalSentBytes
+            };
+            return dto;
+        }
+
+        [Secure]
+        [API]
+        public UserStatusDTO GetUserStatus()
+        {
+            //Dbop.Close();
+            int totalCount = Dbop.GetCount();
+            var banCount = ServerContext.ServerConfig.BoundConfig.UsersBanlist.Count;
+            var onlineCount = ServerContext.Clients.Count();
+            var restCount = totalCount - banCount - onlineCount;
+
+            UserStatusDTO dto = new UserStatusDTO
+            {
+                onlineUsersCount = onlineCount,
+                offlineUsersCount = restCount,
+                banUsersCount = banCount
             };
             return dto;
         }
@@ -79,7 +120,7 @@ namespace NSmartProxy.Extension
             string allowedSuffix = ".log";
             string suffix = Path.GetExtension(filekey);
             string fileName = Path.GetFileName(filekey);
-            string fileFullPath = BASE_LOG_FILE_PATH + "/" + filekey;
+            string fileFullPath = baseLogFilePath + "/" + filekey;
             if (allowedSuffix == suffix)
             {
                 var fs = new FileStream(fileFullPath, FileMode.Open, FileAccess.Read,
@@ -119,6 +160,7 @@ namespace NSmartProxy.Extension
             {
                 case AllowAnonymousUser:
                     ServerContext.SupportAnonymousLogin = (value == "1");
+                    ServerContext.SaveConfigChanges();
                     ; break;
                 default: return "";
             }
@@ -144,8 +186,8 @@ namespace NSmartProxy.Extension
             var config = ServerContext.ServerConfig;
             return new ServerPortsDTO()
             {
-                ReversePort = config.ReversePort,
-                ConfigPort = config.ConfigPort,
+                ReversePort = config.ReversePort_Out > 0 ? config.ReversePort_Out : config.ReversePort,
+                ConfigPort = config.ConfigPort_Out > 0 ? config.ConfigPort_Out : config.ConfigPort,
                 WebAPIPort = config.WebAPIPort
             };
         }
@@ -153,6 +195,14 @@ namespace NSmartProxy.Extension
         #endregion
 
         #region login
+
+        [API]
+        public string GetVersionInfo()
+        {
+            //return $"Server:{Global.NSmartProxyServerName} Client:{Global.NSmartProxyClientName}";
+            return NSPVersion.NSmartProxyServerName;
+        }
+
         [FormAPI]
         public string Login(string username, string userpwd)
         {
@@ -175,13 +225,13 @@ namespace NSmartProxy.Extension
             return string.Format(@"
 <html>
 <head><script>
-document.cookie='NSPTK={0}; path=/;';
+document.cookie='{0}={1}; path=/;';
 document.write('Redirecting...');
 window.location.href='main.html';
 </script>
 </head>
 </html>
-            ", token);
+            ", Global.TOKEN_COOKIE_NAME, token);
         }
 
         /// <summary>
@@ -234,7 +284,7 @@ window.location.href='main.html';
             //2.给token
             string output = $"{username}|{DateTime.Now.ToString("yyyy-MM-dd")}";
             string token = EncryptHelper.AES_Encrypt(output);
-            return new LoginFormClientResult { Token = token, Version = Global.NSmartProxyServerName, Userid = user.userId };
+            return new LoginFormClientResult { Token = token, Version = NSPVersion.NSmartProxyServerName, Userid = user.userId };
         }
         #endregion
 
@@ -318,11 +368,11 @@ window.location.href='main.html';
             {
                 var arr = userIndex.Split(',');
                 var userNameArr = userNames.Split(',');
-                for (var i = arr.Length - 1; i > -1; i--)
-                {
-                    Dbop.Delete(int.Parse(arr[i]));
-                    Dbop.DeleteHash(userNameArr[i]);
-                }
+                //for (var i = arr.Length - 1; i > -1; i--)
+                //{
+                //    Dbop.Delete(int.Parse(arr[i]));
+                //    Dbop.DeleteHash(userNameArr[i]);
+                //}
 
                 //删除用户绑定
                 lock (userLocker)
@@ -333,6 +383,14 @@ window.location.href='main.html';
                 //刷新绑定列表
                 ServerContext.UpdatePortMap();
                 ServerContext.ServerConfig.SaveChanges(ServerContext.ServerConfigPath);
+                for (var i = arr.Length - 1; i > -1; i--)
+                {
+                    var userId = int.Parse(arr[i]);
+                    var userDto = Dbop.Get(userNameArr[i]).ToObject<UserDTO>();
+                    Dbop.Delete(userId);//litedb不起作用
+                    Dbop.DeleteHash(userNameArr[i]);
+                    ServerContext.CloseAllSourceByClient(int.Parse(userDto.userId));
+                }
             }
             catch (Exception ex)
             {
@@ -380,6 +438,59 @@ window.location.href='main.html';
 
         }
 
+        [API]
+        [Secure]
+        public NSPClientConfig GetServerClientConfig(string userId = null)
+        {
+            if (String.IsNullOrWhiteSpace(userId))
+            {
+                var claims =
+                    StringUtil.ConvertStringToTokenClaims(HttpContext.Request.Cookies[Global.TOKEN_COOKIE_NAME].Value);
+                userId = claims.UserKey;
+            }
+
+            var config = Dbop.GetConfig(userId)?.ToObject<NSPClientConfig>();
+            return config;
+        }
+
+        [API]
+        [Secure]
+        public void SetServerClientConfig(string userName, string config)
+        {
+            NSPClientConfig nspClientConfig = null;
+            if (String.IsNullOrWhiteSpace(config))//用户如果清空了配置则客户端会自行使用自己的配置文件
+            {
+                Dbop.SetConfig(userName, "");
+            }
+            else
+            {
+                try
+                {
+                    nspClientConfig = config.ToObject<NSPClientConfig>();
+                    nspClientConfig.UseServerControl = true;
+                    //nspClientConfig.ProviderAddress = HttpContext.Request.Url.Host;
+                    // nspClientConfig.ProviderWebPort = ServerContext.ServerConfig.WebAPIPort;
+                    // nspClientConfig.ConfigPort = ServerContext.ServerConfig.ConfigPort;
+                    // nspClientConfig.ReversePort = ServerContext.ServerConfig.ReversePort;
+                }
+                catch (Exception e)
+                {
+                    throw new Exception("配置格式不正确。");
+                }
+
+                Dbop.SetConfig(userName, nspClientConfig.ToJsonString());
+            }
+
+            //重置客户端(给客户端发送重定向请求让客户端主动重启)
+            var userid = Dbop.Get(userName)?.ToObject<User>().userId;
+            //var popClientAsync = await ServerContext.Clients[userid].AppMap.First().Value.PopClientAsync();
+            
+            ServerContext.CloseAllSourceByClient(int.Parse(userid));
+
+            //ServerContext.CloseAllSourceByClient();
+            //return new NSPClientConfig();
+        }
+
         #endregion
 
         #region connections
@@ -392,65 +503,100 @@ window.location.href='main.html';
             StringBuilder json = new StringBuilder("[ ");
             foreach (var (key, value) in ServerContext.PortAppMap)
             {
-                json.Append("{ ");
-                json.Append(KV2Json("port", key)).C();
-                json.Append(KV2Json("clientId", value.ActivateApp.ClientId)).C();
-                json.Append(KV2Json("appId", value.ActivateApp.AppId)).C();
-                json.Append(KV2Json("blocksCount", value.ActivateApp.TcpClientBlocks.Count)).C();
-                //反向连接
-                json.Append(KV2Json("revconns"));
-                json.Append("[ ");
-                foreach (var reverseClient in value.ActivateApp.ReverseClients)
+
+                if (value.Count > 0)
                 {
-                    json.Append("{ ");
-                    if (reverseClient.Connected)
+                    foreach (var (key2, value2) in value)
                     {
-                        json.Append(KV2Json("lEndPoint", reverseClient.Client.LocalEndPoint.ToString())).C();
-                        json.Append(KV2Json("rEndPoint", reverseClient.Client.RemoteEndPoint.ToString()));
+                        AddAppJsonItem(json, key, value2);
                     }
-
-                    json.Append("}");
-                    json.C();
                 }
-
-                json.D();
-                json.Append("]").C();
-
-                //隧道状态
-                json.Append(KV2Json("tunnels"));
-                json.Append("[ ");
-                foreach (var tunnel in value.ActivateApp.Tunnels)
+                else
                 {
-                    json.Append("{ ");
-                    if (tunnel.ClientServerClient != null)
-                    {
-                        Socket sktClient = tunnel.ClientServerClient.Client;
-                        if (tunnel.ClientServerClient.Connected)
-
-                            json.Append(KV2Json("clientServerClient", $"{sktClient.LocalEndPoint}-{sktClient.RemoteEndPoint}"))
-                                .C();
-                    }
-                    if (tunnel.ConsumerClient != null)
-                    {
-                        Socket sktConsumer = tunnel.ConsumerClient.Client;
-                        if (tunnel.ConsumerClient.Connected)
-                            json.Append(KV2Json("consumerClient", $"{sktConsumer.LocalEndPoint}-{sktConsumer.RemoteEndPoint}"))
-                                .C();
-                    }
-
-                    json.D();
-                    json.Append("}");
-                    json.C();
+                    AddAppJsonItem(json, key, value.ActivateApp);
                 }
+            }
 
-                json.D();
-                json.Append("]");
-                json.Append("}").C();
+            foreach (var (key, value) in ServerContext.UDPPortAppMap)
+            {
+
+                if (value.Count > 0)
+                {
+                    foreach (var (key2, value2) in value)
+                    {
+                        AddAppJsonItem(json, key, value2);
+                    }
+                }
+                else
+                {
+                    AddAppJsonItem(json, key, value.ActivateApp);
+                }
             }
 
             json.D();
             json.Append("]");
             return json.ToString();
+        }
+
+        private void AddAppJsonItem(StringBuilder json, int key, NSPApp value)
+        {
+            json.Append("{ ");
+            json.Append(KV2Json("port", key)).C();
+            json.Append(KV2Json("host", value.Host)).C();
+            json.Append(KV2Json("clientId", value.ClientId)).C();
+            json.Append(KV2Json("appId", value.AppId)).C();
+            json.Append(KV2Json("blocksCount", value.TcpClientBlocks.Count)).C();
+            json.Append(KV2Json("description", value.Description)).C();
+            json.Append(KV2Json("protocol", Enum.GetName(typeof(Protocol), value.AppProtocol))).C();
+            //反向连接
+            json.Append(KV2Json("revconns"));
+            json.Append("[ ");
+            foreach (var reverseClient in value.ReverseClients)
+            {
+                json.Append("{ ");
+                if (reverseClient.Connected)
+                {
+                    json.Append(KV2Json("lEndPoint", reverseClient.Client.LocalEndPoint.ToString())).C();
+                    json.Append(KV2Json("rEndPoint", reverseClient.Client.RemoteEndPoint.ToString()));
+                }
+
+                json.Append("}");
+                json.C();
+            }
+
+            json.D();
+            json.Append("]").C();
+
+            //隧道状态
+            json.Append(KV2Json("tunnels"));
+            json.Append("[ ");
+            foreach (var tunnel in value.Tunnels)
+            {
+                json.Append("{ ");
+                if (tunnel.ClientServerClient != null)
+                {
+                    Socket sktClient = tunnel.ClientServerClient.Client;
+                    if (tunnel.ClientServerClient.Connected)
+
+                        json.Append(KV2Json("clientServerClient", $"{sktClient.LocalEndPoint}-{sktClient.RemoteEndPoint}"))
+                            .C();
+                }
+                if (tunnel.ConsumerClient != null)
+                {
+                    Socket sktConsumer = tunnel.ConsumerClient.Client;
+                    if (tunnel.ConsumerClient.Connected)
+                        json.Append(KV2Json("consumerClient", $"{sktConsumer.LocalEndPoint}-{sktConsumer.RemoteEndPoint}"))
+                            .C();
+                }
+
+                json.D();
+                json.Append("}");
+                json.C();
+            }
+
+            json.D();
+            json.Append("]");
+            json.Append("}").C();
         }
 
         /// <summary>
@@ -601,7 +747,7 @@ window.location.href='main.html';
         }
         private string KV2Json(string key, object value)
         {
-            return "\"" + key + "\":\"" + value.ToString() + "\"";
+            return "\"" + key + "\":\"" + value + "\"";
         }
 
         #endregion
@@ -665,31 +811,12 @@ window.location.href='main.html';
             return fileName;
         }
 
-
-        //[FileUpload]
-        //[Secure]
-        //public string UploadCA(FileInfo fileInfo, int port)
-        //{
-        //    string baseLogPath = "./ca";
-        //    string targetPath = baseLogPath + "/" + port + ".pfx";
-        //    DirectoryInfo dir = new DirectoryInfo(baseLogPath);
-        //    if (!dir.Exists)
-        //    {
-        //        dir.Create();
-        //    }
-
-        //    File.Move(fileInfo.FullName, targetPath);
-
-        //    return "success";
-        //}
-
         [FileUpload]
         [Secure]
         public string UploadTempFile(FileInfo fileInfo)
         {
             string baseLogPath = "./temp";
             string targetPath = baseLogPath + "/" + fileInfo.Name;
-            ///string targetPath = baseLogPath + "/" + port + ".pfx";
             DirectoryInfo dir = new DirectoryInfo(baseLogPath);
             if (!dir.Exists)
             {
@@ -707,8 +834,14 @@ window.location.href='main.html';
         {
             if (!port.IsNum()) throw new Exception("port不是数字");
             int portInt = int.Parse(port);
+            string baseCAPath = "./ca";
+            DirectoryInfo dir = new DirectoryInfo(baseCAPath);
+            if (!dir.Exists)
+            {
+                dir.Create();
+            }
             filename = Path.GetFileName(filename);//安全起见取一下文件名
-            string destPath = "./ca/" + filename;
+            string destPath = baseCAPath + "/" + filename;
             File.Move("./temp/" + filename, destPath);
             ServerContext.PortCertMap[portInt.ToString()] = X509Certificate2.CreateFromCertFile(destPath);
             // ServerContext.PortCertMap[port] = new X509Certificate2,
@@ -761,7 +894,13 @@ window.location.href='main.html';
         #endregion
 
 
-
-
+        /// <summary>
+        /// 设置上下文
+        /// </summary>
+        /// <param name="context"></param>
+        public void SetContext(HttpListenerContext context)
+        {
+            HttpContext = context;
+        }
     }
 }

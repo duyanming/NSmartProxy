@@ -12,6 +12,8 @@ using NSmartProxy.Infrastructure;
 using NSmartProxy.Shared;
 using NSmartProxy.Authorize;
 using System.IO;
+using NSmartProxy.Client.Authorize;
+using System.Collections.Concurrent;
 
 namespace NSmartProxy.Client
 {
@@ -27,6 +29,7 @@ namespace NSmartProxy.Client
         private int _clientID = 0;
 
         public List<TcpClient> ConnectedConnections;
+        public Dictionary<string, UdpClient> ConnectedUdpClients;//ip:port->udpclient
         public ServiceClientListCollection ServiceClientList;  //key:appid value;ClientApp
         public Action ServerNoResponse = delegate { };
         public NSPClientConfig ClientConfig;
@@ -41,6 +44,7 @@ namespace NSmartProxy.Client
         private ServerConnectionManager()
         {
             ConnectedConnections = new List<TcpClient>();
+            ConnectedUdpClients = new Dictionary<string, UdpClient>();
             Router.Logger.Debug("ServerConnectionManager initialized.");
         }
         /// <summary>
@@ -49,16 +53,17 @@ namespace NSmartProxy.Client
         /// <returns></returns>
         public async Task<ClientModel> InitConfig(NSPClientConfig config)
         {
+            //TODO 7 需要重构
             ClientConfig = config;
             ClientModel clientModel = null;
             try
             {
-                clientModel = await ReadConfigFromProvider();
+                clientModel = await SendConfigRequest();
             }
             catch (Exception ex) //如果这里出错，则自动删除缓存
             {
                 //TODO 2 判断服务端返回错误类型，如果是校验错误，则清空缓存
-               
+
                 throw ex;
             }
 
@@ -83,15 +88,16 @@ namespace NSmartProxy.Client
         /// 从服务端读取配置，N问一答模式
         /// </summary>
         /// <returns></returns>
-        private async Task<ClientModel> ReadConfigFromProvider()
+        private async Task<ClientModel> SendConfigRequest()
         {
             //《c#并发编程经典实例》 9.3 超时后取消
             var config = ClientConfig;
             Router.Logger.Debug("Reading Config From Provider..");
             TcpClient configClient = new TcpClient();
+            configClient.NoDelay = true;//配置协议不使用nagle
             bool isConnected = false;
             bool isReconn = (this.ClientID != 0); //TODO XXX如果clientid已经分配到了id 则算作重连
-            for (int j = 0; j < 3; j++)
+            for (int j = 0; j < 3; j++) //连接服务端
             {
                 var delayDispose = Task.Delay(TimeSpan.FromSeconds(Global.DefaultConnectTimeout)).ContinueWith(_ => configClient.Dispose());
                 var connectAsync = configClient.ConnectAsync(config.ProviderAddress, config.ConfigPort);
@@ -131,30 +137,41 @@ namespace NSmartProxy.Client
                 Token = CurrentToken,
                 ClientId = this.ClientID,
                 ClientCount = config.Clients.Count//(obj => obj.AppId == 0) //appid为0的则是未分配的 <- 取消这条规则，总是重新分配
+                //Description = config.Description
             }.ToBytes();
             await configStream.WriteAsync(requestBytes, 0, requestBytes.Length);
 
             //请求2 分配端口
             //httpsupport: 增加host支持
-            int oneEndpointLength = 2 + 1 + 1024;
+            //TODO 7固定协议实现
+            //port proto option(iscompress)  host         description   
+            //2    1     1                   1024         96            
+            int oneEndpointLength = 2 + 1 + 1 + 1024 + 96;//TODO 2 临时写的，这段需要重构
             byte[] requestBytes2 = new byte[config.Clients.Count * (oneEndpointLength)];
             int i = 0;
             foreach (var client in config.Clients)
             {
                 byte[] portBytes = StringUtil.IntTo2Bytes(client.ConsumerPort);
                 int offSetPos = oneEndpointLength * i;
-                requestBytes2[offSetPos] = portBytes[0];
-                requestBytes2[offSetPos + 1] = portBytes[1];
-                requestBytes2[offSetPos + 2] = (byte)client.Protocol;
-                if (client.Host != null)
-                    Encoding.ASCII.GetBytes(client.Host, 0, client.Host.Length, requestBytes2, offSetPos + 3);
+                requestBytes2[offSetPos] = portBytes[0];        //端口
+                requestBytes2[offSetPos + 1] = portBytes[1];    //端口
+                requestBytes2[offSetPos + 2] = (byte)client.Protocol;//协议
+                
+                requestBytes2[offSetPos + 2 + 1] = (byte)(client.IsCompress ? 1 : 0);
+
+                if (client.Host != null)                        //主机名
+                    Encoding.ASCII.GetBytes(client.Host, 0, client.Host.Length, requestBytes2, offSetPos + 4);
+                if (client.Description != null)
+                {
+                    Encoding.UTF8.GetBytes(client.Description, 0, client.Description.Length, requestBytes2, offSetPos + 4 + 1024);
+                }
+
                 i++;
             }
             await configStream.WriteAndFlushAsync(requestBytes2, 0, requestBytes2.Length);
 
-            //读端口配置，此处数组的长度会限制使用的节点数（targetserver）
-            //如果您的机器够给力，可以调高此值
-            byte[] serverConfig = new byte[256];
+            //高于1500左右需要考虑分帧断包的情况
+            byte[] serverConfig = new byte[1024];
 
             //TODO 任何read都应该设置超时
             int readBytesCount = await configStream.ReadAsync(serverConfig, 0, serverConfig.Length);
@@ -164,13 +181,18 @@ namespace NSmartProxy.Client
                 Router.Logger.Debug("连接超时");
             else if (readBytesCount == 1)
             {
-                ServerStatus status = (ServerStatus) serverConfig[0];
+                ServerStatus status = (ServerStatus)serverConfig[0];
                 if (status == ServerStatus.AuthFailed)
                 {
-                    //处理服务器错误
+                    //验证失败，则删除当前服务器的缓存token
                     ClearLoginCache();
-                    Router.Logger.Debug("校验失效，已清空登陆缓存");
+                    Router.Logger.Debug("校验失效，已清空登录缓存");
                     throw new Exception("校验失败");
+                }
+                else if (status == ServerStatus.UserBanned)
+                {
+                    Router.Logger.Debug("该用户被禁用");
+                    throw new Exception("该用户被禁用");
                 }
                 else
                 {
@@ -216,12 +238,12 @@ namespace NSmartProxy.Client
             byte[] requestBytes = StringUtil.ClientIDAppIdToBytes(ClientID, appid);
             var clientList = new List<TcpClient>();
             //补齐
-            var secclient = (new TcpClient()).WrapClient(this.CurrentToken);//包装成客户端
-            var client = secclient.Client;
+            var secureClient = (new TcpClient()).WrapClient(this.CurrentToken);//包装成客户端
+            var client = secureClient.Client; 
             try
             {
                 //1.连接服务端
-                var state = await secclient.ConnectWithAuthAsync(config.ProviderAddress, config.ReversePort);
+                var state = await secureClient.ConnectWithAuthAsync(config.ProviderAddress, config.ReversePort);
                 switch (state)
                 {
                     case AuthState.Success:
@@ -419,9 +441,18 @@ namespace NSmartProxy.Client
 
         }
 
+        //TODO 3 清除特定的登录缓存
         public void ClearLoginCache()
         {
-            File.Delete(Router.NspClientCachePath);
+            //File.Delete(Router.NspClientCachePath);
+            var clientUserCache = UserCacheManager.GetClientUserCache(Router.NspClientCachePath);
+            clientUserCache.Remove(GetEndPoint());
+            UserCacheManager.SaveChanges(Router.NspClientCachePath, clientUserCache);
+        }
+
+        public string GetEndPoint()
+        {
+            return ClientConfig.ProviderAddress + ":" + ClientConfig.ProviderWebPort;
         }
 
 

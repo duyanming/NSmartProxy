@@ -11,6 +11,8 @@ namespace NSmartProxy.Database
         void Update(long key, string value);
         void UpdateByName(string userName,string newUserName, string value);
         List<string> Select(int startIndex, int length);
+        string GetConfig(string userId);
+        void SetConfig(string userId,string config);
         string Get(long key);
         string Get(string key);
         void Delete(int index);
@@ -18,5 +20,6 @@ namespace NSmartProxy.Database
         long GetLength();
         void Close();
         bool Exist(string key);
+        int GetCount();
     }
 }

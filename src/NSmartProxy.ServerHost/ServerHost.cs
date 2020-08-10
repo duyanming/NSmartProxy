@@ -15,7 +15,7 @@ using PeterKottas.DotNetCore.WindowsService.Interfaces;
 
 namespace NSmartProxy.ServerHost
 {
-    public class ServerHost:IMicroService
+    public class ServerHost : IMicroService
     {
 
         private static Mutex mutex = new Mutex(true, "{8639B0AD-A27C-4F15-B3D9-08035D0FC6D6}");
@@ -45,7 +45,7 @@ namespace NSmartProxy.ServerHost
 
         public IConfigurationRoot Configuration { get; set; }
 
-        public const string CONFIG_FILE_PATH = "./appsettings.json";
+        private static readonly string ConfigFilePath = ConfigHelper.AppSettingFullPath;
 
         public void Start()
         {
@@ -71,10 +71,10 @@ namespace NSmartProxy.ServerHost
             Logger = LogManager.GetLogger(loggerRepository.Name, "NSmartServer");
             if (!loggerRepository.Configured) throw new Exception("log config failed.");
 
-            Logger.Debug($"*** {Global.NSmartProxyServerName} ***");
+            Logger.Debug($"*** {NSPVersion.NSmartProxyServerName} ***");
             var builder = new ConfigurationBuilder()
               .SetBasePath(Directory.GetCurrentDirectory())
-              .AddJsonFile(CONFIG_FILE_PATH);
+              .AddJsonFile(ConfigFilePath);
 
             Configuration = builder.Build();
         }
@@ -83,17 +83,17 @@ namespace NSmartProxy.ServerHost
         {
             NSPServerConfig serverConfig = null;
             //初始化配置
-            if (!File.Exists(CONFIG_FILE_PATH))
+            if (!File.Exists(ConfigFilePath))
             {
                 serverConfig = new NSPServerConfig();
-                serverConfig.SaveChanges(CONFIG_FILE_PATH);
+                serverConfig.SaveChanges(ConfigFilePath);
             }
             else
             {
-                serverConfig = ConfigHelper.ReadAllConfig<NSPServerConfig>(CONFIG_FILE_PATH);
+                serverConfig = ConfigHelper.ReadAllConfig<NSPServerConfig>(ConfigFilePath);
             }
 
-            
+
 
             Server srv = new Server(new Log4netLogger());
 
@@ -105,10 +105,10 @@ namespace NSmartProxy.ServerHost
                 try
                 {
                     watch.Start();
-                    srv//.SetWebPort(int.Parse(Configuration.GetSection("WebAPIPort").Value))
+                    srv
                        .SetConfiguration(serverConfig)
-                       .SetAnonymousLogin(true)
-                       .SetServerConfigPath(CONFIG_FILE_PATH)
+                       //.SetAnonymousLogin(false) 从配置文件获取
+                       .SetServerConfigPath(ConfigFilePath)
                        .Start()
                        .Wait();
                 }
@@ -150,7 +150,7 @@ namespace NSmartProxy.ServerHost
         public void Stop()
         {
             //
-            Console.WriteLine(Global.NSmartProxyClientName +" STOPPED.");
+            Console.WriteLine(NSPVersion.NSmartProxyClientName + " STOPPED.");
             Environment.Exit(0);
         }
     }
